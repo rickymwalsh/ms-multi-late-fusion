@@ -63,7 +63,10 @@ def prepare_features(data_path):
                        '_contrast_vs_neighbourhood']:
         cols_to_use = [f'{seq}{col_suffix}' for seq in ['MP2RAGE', 'STIR', 'PSIR']
                        if f'{seq}{col_suffix}' in features_df.columns]
-        features_df[f'other{col_suffix}'] = features_df[cols_to_use].bfill(axis=1).iloc[:, 0]
+        # For MP2RAGE + STIR cases, take the MP2RAGE values first. (For predicted CCs outside of MP2RAGE FOV, the
+        # features will be NaN, so we will use the STIR values anyway.)
+        cols_to_use = sorted(cols_to_use, key=lambda x: x.startswith('MP2RAGE'), reverse=True)  # MP2RAGE first
+        features_df[f'other{col_suffix}'] = features_df[cols_to_use].bfill(axis=1).iloc[:, 0]  # bfill gets the first non-NA value
         features_df = features_df.drop(columns=cols_to_use)
 
     ids_labels['threshold'] = features_df['threshold']
@@ -131,8 +134,7 @@ class Predaptor:
         if not all(col in self.preds_df.columns for col in self.id_cols + ['y_probs']):
             raise ValueError(f'The preds_df DataFrame must have the columns: {self.id_cols + ["y_probs"]}')
         # Check unique row per case_id, cc_id, slice_num
-        seq_cols = [col for col in self.preds_df.columns if col.startswith('seq_')]
-        if not self.preds_df.groupby(self.id_cols + seq_cols).size().eq(1).all():
+        if not self.preds_df.groupby(self.id_cols + ['seq']).size().eq(1).all():
             # If the only difference is the y_probs value, then just take the max y_probs for now
             max_prob = self.preds_df.groupby(self.id_cols + seq_cols)['y_probs'].max().reset_index()
             self.preds_df = pd.merge(self.preds_df[~self.preds_df.duplicated()], max_prob,
@@ -729,24 +731,6 @@ class Predaptor3D(Predaptor):
         self.save_outputs(new_ccs, new_probs, cc_im, self.out_dir)
 
 
-# if __name__ == '__main__':
-#
-#     predadapt3D = Predaptor3D(
-#         cc_dir=Path('/home/rwalsh/Documents/MSMultiSpineChallenge/data/derivatives/preds/sct-ca-raw-augmented-ccs'),
-#         preds_df_path=Path('/home/rwalsh/Documents/MSMultiSpineChallenge/data/derivatives/preds/posthoc_prob_outputs/RandomForestClassifier-aug-3D-decorr-features-CV-mean-preds.csv'),
-#         out_dir=Path('/home/rwalsh/Documents/MSMultiSpineChallenge/data/eval/sct-ca-raw-postproc-augmented-3D-optimised-rfmean/'),
-#         gt_dir=Path('/home/rwalsh/Documents/MSMultiSpineChallenge/data/eval/sct-ca-raw/T2/gt_ccs'))
-#
-#     seqs = {
-#         # 'T2': 'T2_pred_sc_masked_cc.nii.gz',
-#         # 'STIR': 'STIR_pred_warped-linear-masked-sc_cc.nii.gz',
-#         # # 'PSIR': 'PSIR_pred_warped-max-masked-sc_cc.nii.gz',
-#         # 'PSIR': 'PSIR_pred_warped-linear-masked-sc_cc.nii.gz',
-#         # 'MP2RAGE': 'MP2RAGE_pred_resampledSITK-linear-masked-sc_cc.nii.gz',
-#         'mean': 'best_preds_mean_v1_cc.nii.gz'
-#     }
-
-
 def main(args):
     data_dir = args.data_dir / 'tmp'
     out_dir = args.data_dir
@@ -762,11 +746,16 @@ def main(args):
         anat_dir=args.anat_dir,
         preds_df=preds
     )
-    # TODO: with thresholds - is a different thresh optimal depending on the seq ?
+    # TODO: use specific thresholds and masks per group
+    #   -> Subset	Mask	Threshold
+    #       STIR	T2	0.00001
+    #       PSIR	T2	10^-6
+    #       MP2RAGE	mean	0.0001
 
     predadapt3D.run_adaptation(adapt_type='simple',
-                               seqs={'mean': 'preds_mean_cc.nii.gz'},
-                               thresholds=[0.01],  # TODO
+                               seqs={'T2': 'T2_pred_sc-masked_cc.nii.gz',
+                                     'mean': 'preds_mean_cc.nii.gz'},
+                               thresholds=[0.00001],  # TODO
                                min_prob=0.0)
 
 

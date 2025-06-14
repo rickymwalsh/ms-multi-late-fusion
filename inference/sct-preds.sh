@@ -55,15 +55,14 @@ for ftype in STIR PSIR MP2RAGE; do
     $thr_arg \
     $tta_arg
 
-  if ! [ -f $out_path/${ftype}${suffix}_resampled.nii.gz ]; then
-    if [[ ${3} =~ "lesion" ]]; then
-      interp="linear"  # If we don't initially threshold the segmentation, then we use linear interpolation
-    else
-      interp="nn"  # use nearest neighbour interpolation if the segmentation is already thresholded
-    fi
+  if [[ ${3} =~ "lesion" ]]; then
     sct_resample  -i $out_path/tmp/${ftype}${suffix}_origspace.nii.gz \
                   -o $out_path/tmp/${ftype}${suffix}_resampled.nii.gz \
                   -ref $t2_im \
-                  -x $interp
+                  -x linear
+
+    # Create a blank mask to which we apply the same resampling, to track the field of view of the orig image
+    sct_create_mask -i $fpath -p center -size 250mm -f box \
+                    -o $out_path/tmp/${ftype}_FOV.nii.gz
   fi
 done

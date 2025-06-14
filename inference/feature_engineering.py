@@ -187,7 +187,7 @@ def extract_from_dict(d, key_patterns):
         if len(matches) == 0:
             return None
         elif len(matches) > 1:
-            raise ValueError(f"Multiple matches found for {key_pattern}: {matches}")
+            raise ValueError(f"Multiple matches found for {key_pattern}: {[k for k in d_.keys() if key_pattern in k]}")
         return matches[0]
 
     return [extract_single(d, key_pattern) for key_pattern in key_patterns]
@@ -286,7 +286,8 @@ def get_local_contrast(im_arr: np.ndarray, mask: np.ndarray, sc_seg_arr: np.ndar
 
 
 def get_intensity_stats(arr: np.ndarray, cc: np.ndarray, sc_seg_arr: np.ndarray,
-                        neighbourhood_arr: Optional[np.ndarray] = None, slice_idx: Optional[int] = None) -> Dict:
+                        neighbourhood_arr: Optional[np.ndarray] = None, slice_idx: Optional[int] = None,
+                        fov_arr: Optional[np.ndarray] = None) -> Dict:
     """ Calculate intensity statistics for the connected component in the image.
     Args:
         arr (np.ndarray): The 3D image array. Should be the same size as the connected component array, except an extra
@@ -296,11 +297,18 @@ def get_intensity_stats(arr: np.ndarray, cc: np.ndarray, sc_seg_arr: np.ndarray,
         neighbourhood_arr (np.ndarray): The 3D neighbourhood array, if it has been pre-computed, to calculate contrast.
         slice_idx (int): The slice index to use to extract a slice from the 3D image array (and other arrays).
                          If None, the entire 3D array is used.
+        fov_arr (np.ndarray): The 3D field of view array, used to check if the CC is within the field of view of the
+                            anat image, and if not then return None for all statistics.
     Returns:
         dict containing the following statistics: mean_intensity, min_intensity, max_intensity, median_intensity,
         5th_perc_intensity, 95th_perc_intensity, contrast_vs_sc, mean_vs_sc_std, contrast_vs_neighbourhood
     """
-    if any([arr is None, cc is None, sc_seg_arr is None, sc_seg_arr.sum() == 0]):
+    if fov_arr is not None:
+        in_fov_pct = fov_arr[cc > 0].sum() / (cc > 0).sum()
+    else:
+        in_fov_pct = 1.0
+
+    if any([arr is None, cc is None, sc_seg_arr is None, sc_seg_arr.sum() == 0, in_fov_pct < 0.5]):
         return {'mean_intensity': None, 'min_intensity': None, 'max_intensity': None, 'median_intensity': None,
                 '5th_perc_intensity': None, '95th_perc_intensity': None, 'contrast_vs_sc': None,
                 'mean_vs_sc_std': None, 'contrast_vs_neighbourhood': None}
@@ -344,7 +352,8 @@ def get_intensity_stats(arr: np.ndarray, cc: np.ndarray, sc_seg_arr: np.ndarray,
 
 class FeatureProcessor:
     def __init__(self, process_slicewise: bool, pred_dir_parent: Path, anat_dir: Path, thresholds: List, pred_filenames: List,
-                 cc_filenames: List, metadata_df: Optional[pd.DataFrame] = None, metadata_cols: Optional[List[str]] = None,
+                 cc_filenames: List, fov_filenames: List[str], metadata_df: Optional[pd.DataFrame] = None,
+                 metadata_cols: Optional[List[str]] = None,
                  ):
         self.process_slicewise = process_slicewise
         self.pred_dir = pred_dir_parent / 'tmp'
@@ -352,6 +361,7 @@ class FeatureProcessor:
         self.thresholds = thresholds
         self.pred_filenames = pred_filenames
         self.cc_filenames = cc_filenames
+        self.fov_filenames = fov_filenames
         self.metadata_df = metadata_df
         self.metadata_cols = metadata_cols
 
@@ -492,16 +502,23 @@ class FeatureProcessor:
         anat_filenames = [self.anat_dir.glob(f'*{seq}.nii.gz') for seq in self.anat_seqnames]
         anat_filenames = [f.name for sublist in anat_filenames for f in sublist]
         anat_arrs_names = self.load_and_extract_ims(self.anat_dir, anat_filenames, self.anat_seqnames)
+        fov_names = [name + '_FOV' for name in self.anat_seqnames]
+        fov_arrs_names = self.load_and_extract_ims(self.pred_dir, self.fov_filenames, fov_names,
+                                                   interpolator=sitk.sitkNearestNeighbor)
         data = []
         for cc_arr, cc_name, cc_ids, thresh in self.loop_ccs():
             nhood_arr = self.load_nhood_arr(cc_name, thresh)
             for anat_arr, anat_name in anat_arrs_names:
+                # Extract the FOV which matches the anat_name
+                fov_arr = [fov for fov, name in fov_arrs_names if name.replace('_FOV', '') == anat_name]
+                fov_arr = fov_arr[0] if fov_arr else None
                 for cc_id in cc_ids:
                     cc_bin = (cc_arr == cc_id).astype(np.uint8)
                     if not self.process_slicewise:
                         # Get the intensity statistics for the entire connected component
                         nhood_arr_bin = (nhood_arr == cc_id).astype(np.uint8) if nhood_arr is not None else None
-                        intensity_stats = get_intensity_stats(anat_arr, cc_arr, sc_seg_arr, nhood_arr_bin)
+                        intensity_stats = get_intensity_stats(anat_arr, cc_bin, sc_seg_arr, nhood_arr_bin,
+                                                              slice_idx=None, fov_arr=fov_arr)
 
                         row = self.update_row(cc_id, cc_name, thresh, seq_features={anat_name: intensity_stats})
                         data.append(row)
@@ -510,7 +527,8 @@ class FeatureProcessor:
                         for i_x, cc_slice in enumerate(cc_bin):
                             if np.sum(cc_slice) == 0:
                                 continue
-                            intensity_stats = get_intensity_stats(anat_arr, cc_slice, sc_seg_arr, slice_idx=i_x)
+                            intensity_stats = get_intensity_stats(anat_arr, cc_slice, sc_seg_arr, slice_idx=i_x,
+                                                                  fov_arr=fov_arr)
                             row = self.update_row(cc_id, cc_name, thresh, slice_idx=i_x,
                                                   seq_features={anat_name: intensity_stats})
                             data.append(row)
@@ -611,6 +629,26 @@ class FeatureProcessor:
                                                  filename_patterns=[other_seq_name],
                                                  interpolator=sitk.sitkNearestNeighbor
                                                  )[0][0]
+        # Get the corresponding field of view (FOV) mask for the other sequence
+        fov_arr_names = self.load_and_extract_ims(self.pred_dir,
+                                                  self.fov_filenames,
+                                                  [other_seq_name + '_FOV'],
+                                                  interpolator=sitk.sitkNearestNeighbor
+                                                  )
+        if len(fov_arr_names) > 0:
+            fov_arr = fov_arr_names[0][0]
+            in_fov_pct = fov_arr[current_cc_arr > 0].sum() / current_cc_arr.sum()
+            if in_fov_pct < 0.25:
+                # If the current connected component is not in the FOV of the other sequence,
+                #   then return NAN features rather than zeros so that we keep this information
+                feat_names = ['total_load', 'lesion_vol', 'iou', 'max', 'min', 'mean',
+                              'median', '10th', '20th', '90th', '95th', '99th']
+                features = {
+                    other_seq_name: {feat: np.nan for feat in feat_names}
+                }
+                if self.process_slicewise:
+                    features[other_seq_name]['slice_load'] = np.nan
+                return features
 
         total_load = lesion_load(other_cc_arr, self.spacing)  # Total lesion load (or slice load)  (float, mm^3)
 
@@ -743,9 +781,11 @@ class FeatureProcessor:
 def main(args):
     pred_names = ['T2_pred_sc-masked.nii.gz',
                   'MP2RAGE_pred_resampled_sc-masked.nii.gz',
-                  'PSIR_pred_to-T2-warped_sc-masked.nii.gz',
-                  'STIR_pred-to-T2_warped_sc-masked.nii.gz',
+                  'PSIR_pred_warped_sc-masked.nii.gz',
+                  'STIR_pred_warped_sc-masked.nii.gz',
                   'preds_mean.nii.gz']
+
+    fov_names = ['MP2RAGE_FOV_resampled.nii.gz', 'PSIR_FOV_resampled.nii.gz', 'STIR_FOV_resampled.nii.gz']
 
     cc_names = [f'{pred_name.replace(".nii.gz", "")}_cc.nii.gz' for pred_name in pred_names]
 
@@ -764,6 +804,7 @@ def main(args):
         thresholds=args.thresholds,
         pred_filenames=pred_names,
         cc_filenames=cc_names,
+        fov_filenames=fov_names,
         metadata_df=metadata_df,
         metadata_cols=['coverage', 'device_manufacturer_norm', 'device_field_strength'],
     )

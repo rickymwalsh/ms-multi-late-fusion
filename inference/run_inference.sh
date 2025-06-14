@@ -16,14 +16,15 @@ bash sct-preds.sh $in_dir $out_dir sc
 # Register the other seq to T2
 bash register.sh $in_dir $out_dir
 # Process the lesion segmentations (masking by the SC after processing the SC masks & compute mean of T2 and other seq)
-# TODO: check what happens for cases with T2 + MP2RAGE + STIR
+echo "Processing SC & lesion segmentations ----------------"
 python3 postprocess_preds.py --preds_dir $out_dir  \
-  --preds_names T2_pred.nii.gz MP2RAGE_pred_resampled.nii.gz PSIR_pred_to_T2_warped.nii.gz STIR_pred_to_T2_warped.nii.gz
+  --preds_names T2_pred.nii.gz MP2RAGE_pred_origspace.nii.gz PSIR_pred_warped.nii.gz STIR_pred_warped.nii.gz
 # Compute the features used in the posthoc model
+echo "Computing features for posthoc model ----------------"
 python3 feature_engineering.py --pred_dir $out_dir \
   --anat_dir $in_dir \
   --metadata_path $(dirname $(dirname $in_dir))/case_characteristics.tsv \
-  --thresholds 0.01 0.5
+  --thresholds 0.000001 0.00001 0.0001
 ## Adapt the instance probabilities using the posthoc model
 python3 adapt_preds.py --data_dir $out_dir \
   --anat_dir $in_dir \

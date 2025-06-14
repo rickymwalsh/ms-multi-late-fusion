@@ -149,6 +149,30 @@ def main(args):
     preds_mean = mean_ims(preds)
     sitk.WriteImage(preds_mean, preds_dir / 'preds_mean.nii.gz')
 
+    # Process the field of view images, either resampling or warping to T2.
+    fov_paths_dict = {
+        fov_name: {
+            'path': preds_dir / fov_name,
+            'warp': preds_dir / fov_name.replace('_FOV.nii.gz', '_to_T2_warp.nii.gz')
+        }
+        for fov_name in args.fov_names if (preds_dir / fov_name).exists()
+    }
+
+    for fov_name, fov_paths in fov_paths_dict.items():
+        fov_im = sitk.ReadImage(fov_paths['path'])
+        if fov_paths['warp'].exists():
+            warp_im = sitk.ReadImage(fov_paths['warp'], sitk.sitkVectorFloat64)
+            # Create a transform from the warp image
+            transform = sitk.DisplacementFieldTransform(warp_im)
+        else:
+            transform = sitk.Transform()
+        # Resample the FOV image to the T2 space
+        fov_im_resampled = resample_to_ref(fov_im, preds[0], interpolator=sitk.sitkNearestNeighbor,
+                                           dtype=fov_im.GetPixelID(), transform=transform)
+        # Write the resampled FOV image to file
+        new_fov_path = str(fov_paths['path']).replace('.nii.gz', '_resampled.nii.gz')
+        sitk.WriteImage(fov_im_resampled, new_fov_path)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Postprocess predictions for the MSMultiSpineChallenge')
@@ -158,5 +182,8 @@ if __name__ == '__main__':
                         required=True)
 
     args = parser.parse_args()
+    # The field of view ims will also be processed here with SITK, because SCT resampling does not allow a default value
+    #  when out of bounds.
+    args.fov_names = ['MP2RAGE_FOV.nii.gz', 'STIR_FOV.nii.gz', 'PSIR_FOV.nii.gz']
 
     main(args)

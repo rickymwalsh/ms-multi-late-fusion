@@ -5,7 +5,6 @@ in_path=${1}
 out_path=${2}
 tmp_path=${out_path}/tmp
 
-
 t2_path=$in_path/*T2.nii.gz
 if [ $(ls $in_path/*STIR.nii.gz | wc -l) -eq 1 ]; then
   moving_path=$in_path/*STIR.nii.gz
@@ -39,7 +38,6 @@ sct_register_multimodal -i $moving_path_crop -d $t2_path_crop -o $out_path/tmp/$
 
 # Apply transform to pred -> T2
 sct_apply_transfo -i $out_path/tmp/${ftype}_pred_origspace.nii.gz \
-                  -d $t2_path -w $out_path/tmp/${ftype}_to-T2-warp.nii.gz \
-                  -o $out_path/tmp/${ftype}_pred_to-T2-warped.nii.gz -x linear
-
+                  -d $t2_path -w $out_path/tmp/${ftype}_to_T2_warp.nii.gz \
+                  -o $out_path/tmp/${ftype}_pred_warped.nii.gz -x linear
 
