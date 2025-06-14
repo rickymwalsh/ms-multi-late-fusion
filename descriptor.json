@@ -1,0 +1,37 @@
+{
+    "name": "late-fusion-empenn",
+    "description": "A submission for the MS-Multi-Spine challenge, using late fusion to combine predictions from multiple MRI sequences.",
+    "author": "Ricky Walsh",
+    "tool-version": "v1.0.0",
+    "schema-version": "0.5",
+    "command-line": "apt-get update && apt-get install -y unzip; unzip [INPUT_ARCHIVE] -d /app/inference/input ; cd /app/inference; mkdir -p OUTDIR; bash run_inference.sh input/example_data OUTDIR && tar -cvzf [OUTPUT_FILE] OUTDIR\n",
+    "container-image": {
+        "image": "rickymwalsh/late-fusion-empenn:v1.0",
+        "index": "docker://",
+        "type": "docker",
+        "container-opts": [
+          "--runtime=nvidia",
+          "--device=/dev/nvidia0",
+          "--device=/dev/nvidiactl",
+          "--device=/dev/nvidia-uvm",
+          "--device=/dev/nvidia-uvm-tools"
+      ]
+    },
+  "inputs": [
+      {
+        "id": "input_archive",
+        "name": "Input archive",
+        "type": "File",
+        "description": "Input archive containing all files available for one patient",
+        "value-key": "[INPUT_ARCHIVE]"
+      }
+  ],
+  "output-files": [{
+      "description" : "Tarball containing results. Results are expected under the form of a .nii and a .csv file, both written in the OUTDIR",
+      "id" : "outarchive",
+      "name" : "Output archive",
+      "path-template": "[INPUT_ARCHIVE]_output.tgz",
+	  "path-template-stripped-extensions": [".zip"],
+      "value-key": "[OUTPUT_FILE]"
+    }]
+}
