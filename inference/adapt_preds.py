@@ -3,6 +3,8 @@ from pathlib import Path
 import pandas as pd
 import SimpleITK as sitk
 import numpy as np
+import sklearn.ensemble
+import xgboost as xgb
 from tqdm import tqdm
 from skimage.measure import label
 from typing import List, Dict, Tuple, Optional
@@ -118,8 +120,13 @@ def get_preds(features_df: pd.DataFrame, ids: pd.DataFrame, model_dir: Path,
     preds_df = pd.DataFrame()
     for i, model_file in enumerate(model_files):
         model = joblib.load(model_file)
-        col_order = model.get_booster().feature_names
+        # Ensure column order is same as what the model was trained on
+        if isinstance(model, xgb.XGBClassifier):
+            col_order = model.get_booster().feature_names
+        elif isinstance(model, sklearn.ensemble.RandomForestClassifier):
+            col_order = model.feature_names_in_.tolist()
         features_df = features_df[col_order]
+
         if test_fold_df is None:
             preds = model.predict_proba(features_df)[:, 1]  # Get prob of positive class
             preds_df[f'model_{i}'] = preds  # Store predictions from each model in a separate column
@@ -129,6 +136,8 @@ def get_preds(features_df: pd.DataFrame, ids: pd.DataFrame, model_dir: Path,
             case_ids = test_fold_df[test_fold_df['test_fold'] == fold]['case_id'].unique()
             features_subset = features_df[ids['case_id'].isin(case_ids)]
             ids_subset = ids[ids['case_id'].isin(case_ids)].set_index(ids.columns.tolist())
+            if features_subset.empty or len(ids_subset) == 0:
+                continue
             preds = model.predict_proba(features_subset)[:, 1]
             preds_df_tmp = pd.DataFrame({f'model_{i}': preds}, index=ids_subset.index)
             preds_df = pd.concat([preds_df, preds_df_tmp], axis=0)
