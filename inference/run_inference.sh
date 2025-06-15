@@ -28,6 +28,4 @@ echo "Adapting the instance probabilities using the posthoc model --------------
 python3 adapt_preds.py --data_dir $out_dir \
   --anat_dir $in_dir \
   --features_fname features.csv \
-  --model_dir XGBClassifier-submission-aug-3D-v1
-
-
+  --model_dir XGB-RF_submission-aug-3D-v1
