@@ -17,6 +17,9 @@ from im_utils import sitk_to_numpy, new_image_from_ref
 
 def prepare_features(data_path):
     features_df = pd.read_csv(data_path)
+    # Drop the ground-truth IoU column if it exists, as it should not be used for predictions.
+    if 'iou_gt' in features_df.columns:
+        features_df = features_df.drop(columns=['iou_gt'])
 
     def get_vol(seq, else_cond):
         """ Helper function to get the lesion volume for a given sequence. """
