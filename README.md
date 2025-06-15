@@ -1,4 +1,6 @@
 
+## MS-Multi-Spine Late Fusion
+
 Submission for the MS-Multi-Spine challenge based on late fusion of predictions from a publicly available segmentation model.
 
 
