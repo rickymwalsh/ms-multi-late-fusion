@@ -88,6 +88,9 @@ def get_preds(features_df: pd.DataFrame, ids: pd.DataFrame, model_dir: Path,
                         case_id, cc_id, etc.
         model_dir:      Path to the directory with the model(s) to use for predictions. Models should be saved
                         as .joblib files.
+        test_fold_df:   Optional DataFrame with the test fold information. If provided, will be used to filter the
+                        features_df to only include the rows that are in the test fold. This is used for
+                        cross-validation scenarios where the model was trained on a subset of the data.
     Return:
         preds_df:   DataFrame with one row per row in the features_df, retaining the ID cols
                     and the predicted probabilities for each connected component.
@@ -96,14 +99,23 @@ def get_preds(features_df: pd.DataFrame, ids: pd.DataFrame, model_dir: Path,
     if not model_files:
         raise ValueError(f'No models found in {model_dir}. Please provide a valid directory with models.')
 
-
     preds_df = pd.DataFrame()
     for i, model_file in enumerate(model_files):
         model = joblib.load(model_file)
         col_order = model.get_booster().feature_names
         features_df = features_df[col_order]
-        preds = model.predict_proba(features_df)[:, 1]  # Get prob of positive class
-        preds_df[f'model_{i}'] = preds  # Store predictions from each model in a separate column
+        if test_fold_df is None:
+            preds = model.predict_proba(features_df)[:, 1]  # Get prob of positive class
+            preds_df[f'model_{i}'] = preds  # Store predictions from each model in a separate column
+        else:
+            # Model filename should be fold-[0-5].joblib
+            fold = int(model_file.stem.split('-')[-1])
+            case_ids = test_fold_df[test_fold_df['test_fold'] == fold]['case_id'].unique()
+            features_subset = features_df[ids['case_id'].isin(case_ids)]
+            ids_subset = ids[ids['case_id'].isin(case_ids)].set_index(ids.columns.tolist())
+            preds = model.predict_proba(features_subset)[:, 1]
+            preds_df_tmp = pd.DataFrame({f'model_{i}': preds}, index=ids_subset.index)
+            preds_df = pd.concat([preds_df, preds_df_tmp], axis=0)
 
     preds_df['y_probs'] = preds_df.mean(axis=1)  # Average the probabilities across all models
 
@@ -821,8 +833,10 @@ def main(args):
     out_dir = args.data_dir
 
     features_df, ids_df = prepare_features(data_dir / args.features_fname)
+    if args.test_fold_csv is not None:
+        test_fold_df = pd.read_csv(args.test_fold_csv)
 
-    preds = get_preds(features_df, ids_df, args.model_dir)
+    preds = get_preds(features_df, ids_df, args.model_dir, test_fold_df=test_fold_df)
     preds.to_csv(data_dir / 'probs.csv', index=False)
 
     predadapt3D = Predaptor3D(
@@ -853,6 +867,12 @@ if __name__ == '__main__':
                         help='Directory containing the posthoc models to be used for adaptation. The models should be '
                              'saved as .joblib files. All of the models in this directory will be loaded and used. '
                              'And the output probability will be the average of all the models.')
+    parser.add_argument('--test_fold_csv', type=Path, default=None,
+                        help='Path to CSV file which tracks the IDs in the left-out test fold for each model. '
+                             'This is not used when deployed, but is only used during development, to ensure we '
+                             'do not evaluate the models on samples from their training set. The CSV should have '
+                             'columns: case_id, test_fold. e.g., the test_fold is 3 for a sample which was in the '
+                             'held-out test set for the model fold-3.joblib')
 
     args = parser.parse_args()
 
