@@ -30,6 +30,10 @@ fi
 # Process the T2 pred first
 for t2_im in $in_path/*T2.nii.gz; do
   # Get pred
+  if [ -f $out_path/tmp/T2${suffix}.nii.gz ]; then
+    # Prediction already exists
+    continue
+  fi
   CUDA_VISIBLE_DEVICES=0 SCT_USE_GPU=1 sct_deepseg $task \
     -i $t2_im \
     -o $out_path/tmp/T2${suffix}.nii.gz \
@@ -47,6 +51,10 @@ for ftype in STIR PSIR MP2RAGE; do
   # Get pred if the file exists
   if [ ! -f $fpath ]; then
     echo "File $fpath does not exist. Skipping modality $ftype."
+    continue
+  fi
+  if [ -f $out_path/tmp/${ftype}${suffix}_origspace.nii.gz ]; then
+    # Prediction already exists
     continue
   fi
   CUDA_VISIBLE_DEVICES=0 SCT_USE_GPU=1 sct_deepseg $task \
