@@ -858,8 +858,7 @@ def main(args):
     out_dir = args.data_dir
 
     features_df, ids_df = prepare_features(data_dir / args.features_fname)
-    if args.test_fold_csv is not None:
-        test_fold_df = pd.read_csv(args.test_fold_csv)
+    test_fold_df = pd.read_csv(args.test_fold_csv) if args.test_fold_csv else None
 
     preds = get_preds(features_df, ids_df, args.model_dir, test_fold_df=test_fold_df)
     preds.to_csv(data_dir / 'probs.csv', index=False)
