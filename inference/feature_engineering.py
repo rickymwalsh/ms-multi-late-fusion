@@ -13,10 +13,6 @@ import logging
 from im_utils import sitk_to_numpy, new_image_from_ref, resample_to_ref, get_bbox_bounds
 
 
-# TODO: Restrict to relevant preds - will only process the mean CCs, no need for other CCs
-# TODO: decide on thresholds - different threshold for different subgroup (but always mean?)
-
-
 def load_reorient(im_path, orientation='LAS'):
     im = sitk.ReadImage(im_path)
     return sitk.DICOMOrient(im, orientation)
@@ -853,7 +849,6 @@ if __name__ == '__main__':
                         help='Path to the directory containing the predictions')
     parser.add_argument('--anat_dir', '-a', type=Path, required=True,
                         help='Path to the directory containing the raw anatomical images')
-    # TODO: restrict to chosen thresholds ?
     parser.add_argument('--thresholds', '-t', type=float, nargs='+',
                         default=[0.000001, 0.00001, 0.0001, 0.001, 0.01, 0.1, 0.5],
                         help='Thresholds to use for generating connected components.')
