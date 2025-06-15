@@ -24,10 +24,14 @@ def prepare_features(data_path):
     # Rename seq to mask, because it just refers to the current mask we're using for the current CC
     features_df = features_df.rename(columns={'seq': 'mask'})
     # Get other_seq based on which column has non-null values
+    def check_col(row, seq, df):
+        """ Helper function to check if a column has non-null values. """
+        return pd.notnull(row[f'{seq}_total_load']) if f'{seq}_total_load' in df.columns else False
+
     features_df['other_seq'] = features_df.apply(
-        lambda row: ('MP2RAGE' if pd.notnull(row['MP2RAGE_total_load']) else
-                     ('STIR' if pd.notnull(row['STIR_total_load']) else
-                      ('PSIR' if pd.notnull(row['PSIR_total_load']) else None))),
+        lambda row: 'MP2RAGE' if check_col('MP2RAGE', row, features_df) else
+                    ('STIR' if check_col('STIR', row, features_df) else
+                     ('PSIR' if check_col('PSIR', row, features_df) else None)),
         axis=1)
 
     def get_vol(seq, else_cond):
@@ -66,6 +70,7 @@ def prepare_features(data_path):
         ('_95th_perc_intensity', '_median_intensity', '_contrast_vs_sc',
          '_99th', '_95th', '_90th', '_mean', '_20th', '_min'))]
 
+    drop_cols.pop(drop_cols.index('mask_mean'))  # Keep mask_mean -> just indicates the current mask is the mean mask
     features_df = features_df.drop(columns=drop_cols)
 
     # Create single column for each of the sequence-specific columns to avoid NAs for training the models
