@@ -21,10 +21,19 @@ def prepare_features(data_path):
     if 'iou_gt' in features_df.columns:
         features_df = features_df.drop(columns=['iou_gt'])
 
+    # Rename seq to mask, because it just refers to the current mask we're using for the current CC
+    features_df = features_df.rename(columns={'seq': 'mask'})
+    # Get other_seq based on which column has non-null values
+    features_df['other_seq'] = features_df.apply(
+        lambda row: ('MP2RAGE' if pd.notnull(row['MP2RAGE_total_load']) else
+                     ('STIR' if pd.notnull(row['STIR_total_load']) else
+                      ('PSIR' if pd.notnull(row['PSIR_total_load']) else None))),
+        axis=1)
+
     def get_vol(seq, else_cond):
         """ Helper function to get the lesion volume for a given sequence. """
         vol_col = features_df[f'{seq}_lesion_vol'] if f'{seq}_lesion_vol' in features_df.columns else np.nan
-        return np.where(features_df['seq'] == seq, vol_col, else_cond)
+        return np.where(features_df['mask'] == seq, vol_col, else_cond)
 
     features_df['current_vol'] = get_vol('T2',
                                          get_vol('STIR',
@@ -33,11 +42,13 @@ def prepare_features(data_path):
                                                                  features_df['mean_lesion_vol']))))
 
     # Create one-hot columns (do it this way to ensure all combinations are present, even if not in current DF)
-    for col, values in zip(['coverage', 'device_manufacturer_norm', 'seq'],
-                           [['UpperSC', 'LowerSC'], ['Philips', 'Siemens'], ['MP2RAGE', 'PSIR', 'STIR', 'T2', 'mean']]):
+    cat_cols = ['coverage', 'device_manufacturer_norm', 'mask', 'other_seq']
+    for col, values in zip(cat_cols,
+                           [['UpperSC', 'LowerSC'], ['Philips', 'Siemens'], ['MP2RAGE', 'PSIR', 'STIR', 'T2', 'mean'],
+                            ['MP2RAGE', 'PSIR', 'STIR', 'T2']]):
         for value in values:
             features_df[f'{col}_{value}'] = np.where(features_df[col] == value, 1, 0)
-    features_df = features_df.drop(columns=['coverage', 'device_manufacturer_norm', 'seq'])
+    features_df = features_df.drop(columns=cat_cols)
 
     # Convert inf to nan
     features_df = features_df.replace([np.inf, -np.inf], np.nan)
@@ -55,12 +66,9 @@ def prepare_features(data_path):
         ('_95th_perc_intensity', '_median_intensity', '_contrast_vs_sc',
          '_99th', '_95th', '_90th', '_mean', '_20th', '_min'))]
 
-    drop_cols.pop(drop_cols.index('seq_mean'))
     features_df = features_df.drop(columns=drop_cols)
 
     # Create single column for each of the sequence-specific columns to avoid NAs for training the models
-    # TODO: consider this if using STIR for T2+STIR+MP2RAGE cases outside of MP2RAGE FOV
-    #       And also just for the 3 sequence cases
     for col_suffix in ['_total_load', '_lesion_vol', '_iou', '_max', '_median', '_10th', '_mean_intensity',
                        '_min_intensity', '_max_intensity', '_5th_perc_intensity', '_mean_vs_sc_std',
                        '_contrast_vs_neighbourhood']:
@@ -73,8 +81,8 @@ def prepare_features(data_path):
         features_df = features_df.drop(columns=cols_to_use)
 
     ids_labels['threshold'] = features_df['threshold']
-    seq_cols = [col for col in features_df.columns if col.startswith('seq_')]
-    ids_labels['seq'] = features_df[seq_cols].idxmax(axis=1).str.replace('seq_', '')
+    mask_cols = [col for col in features_df.columns if col.startswith('mask_')]
+    ids_labels['mask'] = features_df[mask_cols].idxmax(axis=1).str.replace('mask_', '')
 
     return features_df, ids_labels
 
@@ -170,13 +178,13 @@ class Predaptor:
         if not all(col in self.preds_df.columns for col in self.id_cols + ['y_probs']):
             raise ValueError(f'The preds_df DataFrame must have the columns: {self.id_cols + ["y_probs"]}')
         # Check unique row per case_id, cc_id, slice_num
-        if not self.preds_df.groupby(self.id_cols + ['seq']).size().eq(1).all():
+        if not self.preds_df.groupby(self.id_cols + ['mask']).size().eq(1).all():
             # If the only difference is the y_probs value, then just take the max y_probs for now
-            max_prob = self.preds_df.groupby(self.id_cols + ['seq'])['y_probs'].max().reset_index()
+            max_prob = self.preds_df.groupby(self.id_cols + ['mask'])['y_probs'].max().reset_index()
             self.preds_df = pd.merge(self.preds_df[~self.preds_df.duplicated()], max_prob,
-                                     on=self.id_cols + ['seq'] + ['y_probs'], how='inner')
-            print('Dups found in preds_df. Taking max y_probs for each case_id, cc_id, slice_num, threshold, seq_T2, seq_STIR, etc.')
-            # raise ValueError('There must be a unique row per case_id, cc_id, threshold, seq_T2, seq_STIR, etc.'
+                                     on=self.id_cols + ['mask'] + ['y_probs'], how='inner')
+            print('Dups found in preds_df. Taking max y_probs for each case_id, cc_id, slice_num, threshold, mask, etc.')
+            # raise ValueError('There must be a unique row per case_id, cc_id, threshold, mask, etc.'
             #                  ' in the preds_df DataFrame')
 
     def get_orientation(self) -> Dict:
@@ -312,7 +320,7 @@ class Predaptor:
             probs_df (pd.DataFrame): A DataFrame with the probabilities for each connected component.
                 Should have columns: cc_id, slice_num, predicted_prob, and the matching identifying variables as in
                 overlapping_lesions_df.
-            id_names (List): The base names of the identifying variables in the DataFrame. E.g. ['thresh', 'seq']
+            id_names (List): The base names of the identifying variables in the DataFrame. E.g. ['thresh', 'mask']
         Returns:
             overlapping_lesions_dict (Dict): A dictionary with the keys as the combination of the ID columns in
                 overlapping_lesions_df, along with the cc_id and slice_num.
@@ -595,7 +603,7 @@ class Predaptor:
             if len(mask_types) != 1:
                 raise ValueError(f'Expected exactly one sequence type in mask_fname: {mask_fname}. Found: {mask_types}')
             mask_type = mask_types[0]
-            rf_subset = self.preds_df[(self.preds_df[f'seq'] == mask_type) & (self.preds_df['threshold'] == thresh)]
+            rf_subset = self.preds_df[(self.preds_df[f'mask'] == mask_type) & (self.preds_df['threshold'] == thresh)]
             if rf_subset.empty:
                 msg = f'No prediction rows for {mask_type} with threshold {thresh}. Will save blank image.'
                 warn(msg)
@@ -671,8 +679,8 @@ class Predaptor:
         probs_df = probs_df.rename(columns={'y_probs': 'predicted_prob'})
 
         # Get all overlapping lesions
-        overlapping_lesions_df = self.get_all_overlapping_lesions(cc_arrs, im_ids, ['threshold', 'seq'])
-        overlapping_lesions_dict = self.structure_overlap_dict(overlapping_lesions_df, probs_df, ['threshold', 'seq'])
+        overlapping_lesions_df = self.get_all_overlapping_lesions(cc_arrs, im_ids, ['threshold', 'mask'])
+        overlapping_lesions_dict = self.structure_overlap_dict(overlapping_lesions_df, probs_df, ['threshold', 'mask'])
 
         # Get the lesions to keep, i.e. in case of overlap, take the lesion-slice form with the highest probability
         lesions_to_keep = self.get_lesions_to_keep(overlapping_lesions_dict)
@@ -815,8 +823,8 @@ class Predaptor3D(Predaptor):
         probs_df = probs_df.rename(columns={'y_probs': 'predicted_prob'})
 
         # Get all overlapping lesions
-        overlapping_lesions_df = self.get_all_overlapping_lesions(cc_arrs, im_ids, ['threshold', 'seq'])
-        overlapping_lesions_dict = self.structure_overlap_dict(overlapping_lesions_df, probs_df, ['threshold', 'seq'])
+        overlapping_lesions_df = self.get_all_overlapping_lesions(cc_arrs, im_ids, ['threshold', 'mask'])
+        overlapping_lesions_dict = self.structure_overlap_dict(overlapping_lesions_df, probs_df, ['threshold', 'mask'])
 
         # Get the lesions to keep, i.e. in case of overlap, take the lesion-slice form with the highest probability
         lesions_to_keep = self.get_lesions_to_keep(overlapping_lesions_dict)
