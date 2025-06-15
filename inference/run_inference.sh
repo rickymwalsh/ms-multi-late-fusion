@@ -1,7 +1,5 @@
 #!/bin/bash
 
-# TODO: for T2+MP2RAGE+STIR -> take MP2RAGE where it exists, otherwise take STIR (needs to be done in mean pred, then also in features, and also in adapt_preds)
-
 # Args:
 #   1- in_dir: path to data for a single case
 #   2- out_dir: path to the output directory for a single case
@@ -18,17 +16,18 @@ bash register.sh $in_dir $out_dir
 # Process the lesion segmentations (masking by the SC after processing the SC masks & compute mean of T2 and other seq)
 echo "Processing SC & lesion segmentations ----------------"
 python3 postprocess_preds.py --preds_dir $out_dir  \
-  --preds_names T2_pred.nii.gz MP2RAGE_pred_origspace.nii.gz PSIR_pred_warped.nii.gz STIR_pred_warped.nii.gz
+  --preds_names T2_pred.nii.gz MP2RAGE_pred_resampled.nii.gz PSIR_pred_warped.nii.gz STIR_pred_warped.nii.gz
 # Compute the features used in the posthoc model
 echo "Computing features for posthoc model ----------------"
 python3 feature_engineering.py --pred_dir $out_dir \
   --anat_dir $in_dir \
   --metadata_path $(dirname $(dirname $in_dir))/case_characteristics.tsv \
   --thresholds 0.000001 0.00001 0.0001
-## Adapt the instance probabilities using the posthoc model
+# Adapt the instance probabilities using the posthoc model
+echo "Adapting the instance probabilities using the posthoc model ----------------"
 python3 adapt_preds.py --data_dir $out_dir \
   --anat_dir $in_dir \
   --features_fname features.csv \
-  --model_dir XGBClassifier-aug-3D-decorr-features-CV
+  --model_dir XGBClassifier-submission-aug-3D-v1
 
 
