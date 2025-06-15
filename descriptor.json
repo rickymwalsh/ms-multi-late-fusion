@@ -2,9 +2,9 @@
     "name": "late-fusion-empenn",
     "description": "A submission for the MS-Multi-Spine challenge, using late fusion to combine predictions from multiple MRI sequences.",
     "author": "Ricky Walsh",
-    "tool-version": "v1.0.0",
+    "tool-version": "v1.0",
     "schema-version": "0.5",
-    "command-line": "apt-get update && apt-get install -y unzip; unzip [INPUT_ARCHIVE] -d /app/inference/input ; cd /app/inference; mkdir -p OUTDIR; bash run_inference.sh input/example_data OUTDIR && tar -cvzf [OUTPUT_FILE] OUTDIR\n",
+    "command-line": "home=$(pwd); unzip [INPUT_ARCHIVE] -d /app/inference/input ; cd /app/inference; mkdir -p OUTDIR; bash run_inference.sh input/* OUTDIR; rm -rf OUTDIR/tmp && tar -cvzf ${home}/[OUTPUT_FILE] OUTDIR",
     "container-image": {
         "image": "rickymwalsh/late-fusion-empenn:v1.0",
         "index": "docker://",
