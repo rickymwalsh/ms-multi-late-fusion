@@ -382,6 +382,7 @@ class FeatureProcessor:
         self.cc_arrs_names = None
         self.features_df = None
         self.anat_im = None  # target image for resampling if necessary
+        self.gt_arr = None # ground truth image, if available
         self.spacing = None  # target spacing
         self.mid_slice_num = None
         self.upper_sc_limit = None
@@ -400,8 +401,15 @@ class FeatureProcessor:
     def update_anat_im(self):
         """ Load the target anat image, to which all predictions should be resampled. """
         fpath = list(self.anat_dir.glob('*T2.nii.gz'))[0]
-        self.anat_im = load_reorient(fpath)
+        self.anat_im = load_reorient(fpath, 'LAS')
         self.spacing = self.anat_im.GetSpacing()
+
+    def update_gt_arr(self):
+        """ Load the ground truth image, if available, to compute iou_gt. """
+        gt_fpath = list(self.anat_dir.glob('*_LESIONMASK.nii.gz'))
+        if gt_fpath:
+            gt_fpath = gt_fpath[0]
+            self.gt_arr = sitk_to_numpy(load_reorient(gt_fpath, 'LAS'))
 
     def load_and_extract_ims(self, dirpath: Path, filenames: List[str], filename_patterns: List[str],
                              interpolator=sitk.sitkLinear) -> List[Tuple[np.ndarray, str]]:
@@ -572,6 +580,30 @@ class FeatureProcessor:
             'dist_to_top': dist_to_top
         }
 
+    def get_iou_gt(self, cc_arr, slice_idx=None):
+        """ Get the IoU between the connected component and the ground truth.
+        Args:
+            cc_arr (np.ndarray): The connected component array.
+            slice_idx (int): The slice index to use to extract a slice from the 3D image array (and other arrays).
+                             If None, the entire 3D array is used.
+        Returns:
+            float: The IoU value between the connected component and the ground truth.
+        """
+        if self.gt_arr is None:
+            return None
+        gt_arr = self.gt_arr if slice_idx is None else self.gt_arr[slice_idx]
+        # Want to get IoU with individual GT lesions, as is done during evaluation.
+        # Then we take the max IoU for the given predicted connected component.
+        ious = []
+        gt_cc_ids = np.unique(gt_arr)
+        if len(gt_cc_ids) == 1 and gt_cc_ids[0] == 0:
+            return 0.0
+        for gt_id in gt_cc_ids[1:]:
+            gt_bin = (gt_arr == gt_id).astype(np.uint8)
+            iou = get_iou(gt_bin, cc_arr)
+            ious.append(iou)
+        return np.max(ious)
+
     def process_current_2d_or_3d(self, pmaps_arr, cc_bin, cc_arr, seq_name, slice_idx=None):
         """ Process the current connected component and extract features for the current slice or the 3D component.
         Args:
@@ -582,6 +614,7 @@ class FeatureProcessor:
             slice_idx - The slice index to use to extract a slice from the 3D image array (and other arrays).
                         If None, the entire 3D array is used.
         """
+        iou_gt = self.get_iou_gt(cc_bin, slice_idx)  # IoU with the ground truth (if GT exists)
         lesion_vol = lesion_load(cc_bin, self.spacing)  # Lesion volume (or lesion-slice volume) (float, mm^3)
         total_load = lesion_load(cc_arr, self.spacing)  # Total lesion load for full volume  (float, mm^3)
         position_stats = self.get_position_stats(cc_bin, slice_idx)  # dict
@@ -596,6 +629,7 @@ class FeatureProcessor:
             adjacent_stats = {}
 
         general_features = {
+            'iou_gt': iou_gt,
             **position_stats,
             **adjacent_stats
         }
@@ -739,8 +773,9 @@ class FeatureProcessor:
         Returns:
             pd.DataFrame: A dataframe containing the features for the subject.
         """
-        # Load the ground truth image
+        # Load the anat image and GT image, if available
         self.update_anat_im()
+        self.update_gt_arr()
 
         # Load the SC segmentation
         sc_seg_arr = load_reorient(self.pred_dir / 'T2_sc_seg.nii.gz', 'LAS')
