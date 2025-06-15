@@ -76,7 +76,9 @@ def prepare_features(data_path):
     return features_df, ids_labels
 
 
-def get_preds(features_df: pd.DataFrame, ids: pd.DataFrame, model_dir: Path) -> pd.DataFrame:
+def get_preds(features_df: pd.DataFrame, ids: pd.DataFrame, model_dir: Path,
+              test_fold_df: Optional[pd.DataFrame] = None
+              ) -> pd.DataFrame:
     """
     Run the given features through the model(s) to get predicted probabilities. If there are multiple models in the
     directory, then the average of all predicted probabilities for a given case will be taken.
@@ -104,14 +106,20 @@ def get_preds(features_df: pd.DataFrame, ids: pd.DataFrame, model_dir: Path) -> 
         preds_df[f'model_{i}'] = preds  # Store predictions from each model in a separate column
 
     preds_df['y_probs'] = preds_df.mean(axis=1)  # Average the probabilities across all models
-    preds_df = pd.concat([ids, preds_df], axis=1)
+
+    if test_fold_df is None:
+        preds_df = pd.concat([ids, preds_df], axis=1)
+    else:
+        preds_df = preds_df.reset_index()
 
     return preds_df
 
 
 class Predaptor:
     def __init__(self, cc_dir: Path, out_dir: Path, anat_dir: Path, preds_df_path: Optional[Path] = None,
-                 preds_df: Optional[pd.DataFrame] = None, id_cols: List[str] = None):
+                 preds_df: Optional[pd.DataFrame] = None, id_cols: List[str] = None,
+                 masks_to_use: Optional[Dict] = None, thresh_to_use: Optional[Dict] = None
+                 ):
         to_check = [cc_dir, anat_dir] if preds_df_path is None else [cc_dir, anat_dir, preds_df_path]
         check_exists(to_check, error=True)
         assert (preds_df is None) != (preds_df_path is None), 'Either preds_df or preds_df_path must be provided.'
@@ -127,7 +135,20 @@ class Predaptor:
 
         self.process_slicewise = True
 
+        if masks_to_use is not None:
+            self.masks_to_use = masks_to_use
+        else:
+            self.masks_to_use = {'STIR': 'T2_pred_sc-masked_cc.nii.gz',
+                                 'PSIR': 'T2_pred_sc-masked_cc.nii.gz',
+                                 'MP2RAGE': 'preds_mean_cc.nii.gz',
+                                 }
+        if thresh_to_use is not None:
+            self.thresh_to_use = thresh_to_use
+        else:
+            self.thresh_to_use = {'STIR': 0.00001, 'PSIR': 0.000001, 'MP2RAGE': 0.0001}
+
         self.target_orientation = self.get_orientation()
+        self.subject_group = self.get_subject_group()
 
     def sense_check_preds(self):
         """ Check that preds_df has the expected columns."""
@@ -136,16 +157,12 @@ class Predaptor:
         # Check unique row per case_id, cc_id, slice_num
         if not self.preds_df.groupby(self.id_cols + ['seq']).size().eq(1).all():
             # If the only difference is the y_probs value, then just take the max y_probs for now
-            max_prob = self.preds_df.groupby(self.id_cols + seq_cols)['y_probs'].max().reset_index()
+            max_prob = self.preds_df.groupby(self.id_cols + ['seq'])['y_probs'].max().reset_index()
             self.preds_df = pd.merge(self.preds_df[~self.preds_df.duplicated()], max_prob,
-                                     on=self.id_cols + seq_cols + ['y_probs'], how='inner')
+                                     on=self.id_cols + ['seq'] + ['y_probs'], how='inner')
             print('Dups found in preds_df. Taking max y_probs for each case_id, cc_id, slice_num, threshold, seq_T2, seq_STIR, etc.')
             # raise ValueError('There must be a unique row per case_id, cc_id, threshold, seq_T2, seq_STIR, etc.'
             #                  ' in the preds_df DataFrame')
-
-        if 'seq' not in self.preds_df.columns and any(c.starts_with('seq_') for c in self.preds_df.columns):
-            # Undo one-hot encoding for seq columns, i.e. seq_T2 (True, False,...), seq_STIR (False, True,...) -> seq ('T2', 'STIR',...)
-            self.preds_df['seq'] = self.preds_df[seq_cols].idxmax(axis=1).str.replace('seq_', '')
 
     def get_orientation(self) -> Dict:
         """ Get the orientation of the GT images for each subject/case.
@@ -156,6 +173,35 @@ class Predaptor:
         t2_im = sitk.ReadImage(t2_path)
         orientation = sitk.DICOMOrientImageFilter_GetOrientationFromDirectionCosines(t2_im.GetDirection())
         return orientation
+
+    def get_subject_group(self) -> str:
+        """ Check which supplementary sequences are available for the subject. """
+        anat_files = list(self.anat_dir.glob('*.nii.gz'))
+
+        group = ''
+        for seq in ['STIR', 'PSIR', 'MP2RAGE']:
+            if any(seq in str(f) for f in anat_files):
+                if group:
+                    group += '_'
+                group += seq
+        if not group:
+            warn('No supplementary sequences found in the anat_dir. Using only T2 sequence.')
+            group = 'T2'
+
+        return group
+
+    def get_fov_ims(self, seq: str) -> np.ndarray:
+        """ Get the field of view image for a given sequence.
+        Args:
+            seq (str): The sequence to get the FOV image for. E.g. 'T2', 'STIR', 'PSIR', 'MP2RAGE'.
+        Returns:
+            fov_im (np.ndarray): The 3D array of the FOV image for the given sequence.
+        """
+        fov_path = self.out_dir / 'tmp' / f'{seq}_FOV_resampled.nii.gz'
+        if not fov_path.exists():
+            raise FileNotFoundError(f'FOV image for {seq} not found at {fov_path}.')
+        fov_im = sitk_to_numpy(sitk.ReadImage(str(fov_path)))
+        return fov_im
 
     @staticmethod
     def get_old_new_cc_matches(old_cc_arr, new_cc_arr):
@@ -465,11 +511,11 @@ class Predaptor:
 
         # Extract the probability for each connected component
         probs_df = self.get_probs_from_ccs(cc_arr, probs_arr)
-        probs_df.to_csv(out_dir / 'prediction_proba.csv')
+        probs_df.to_csv(out_dir / 'prediction_proba.csv', index=False)
 
-    def process_and_save_simple(self, preds_rows: pd.DataFrame, cc_arr: np.ndarray, probs_arr: np.ndarray,
-                                out_dir: Path, cc_im: Optional[sitk.Image] = None,
-                                cc_path: Optional[Path] = None, min_prob: Optional[float] = None):
+    def process_cc_probs_simple(self, preds_rows: pd.DataFrame, cc_arr: np.ndarray, probs_arr: np.ndarray,
+                                min_prob: Optional[float] = None
+                                ) -> Tuple[np.ndarray, np.ndarray]:
         for _, row in preds_rows.iterrows():
             cc_id = row['cc_id']
             slice_num = row['slice_num']
@@ -485,11 +531,10 @@ class Predaptor:
         # Recalculate the connected components and their associated max probabilities
         cc_arr, probs_arr = self.reprocess_ccs(cc_arr, probs_arr)
 
-        # Save the new connected components
-        self.save_outputs(cc_arr, probs_arr, cc_im, out_dir)
+        return cc_arr, probs_arr
 
-    def adapt_simple_single_case(self, seqs: Dict[str, str], thresholds: List[float],
-                                 min_prob: float = 0.15):
+
+    def adapt_simple_single_case(self, min_prob: float = 0.15):
         """ Simple adaptation - keeping the same form as before and just adapting the probability and possibly
             removing slices from larger connected components.
         Logic for removing slices:
@@ -502,36 +547,82 @@ class Predaptor:
             The new CC is saved in out_dir with a corresponding csv with
             the following columns: label, p. label corresponds to the CC id and p is the probability for that CC.
         Args:
-            seqs (Dict): The sequence names to adapt. Keys correspond to the columns in the preds_df, and the values are
-                         the filenames in the cc_dir (cc_dir / f'thr-{thresh}' / seqs['T2'] (-> T2_pred_cc.nii.gz))
-            thresholds (List): The thresholds to adapt. Should correspond to the 'threshold' column in the preds_df,
-                               and the folder names in the cc_dir (cc_dir / f'thr-{thresh}' / T2_pred_cc.nii.gz)
             min_prob (float): The minimum probability to keep a lesion on a slice. Default is 0.15.
                               If the entire 3D connected component has a max probability below this, then it is NOT
                               affected. We want to adapt lesion extent, but not to remove whole lesions.
         Returns:
             None
         """
-        for seq in seqs:
-            for thresh in thresholds:
+        if '_' not in self.subject_group:
+            mask_names = [self.masks_to_use[self.subject_group]]
+            thresholds = [self.thresh_to_use[self.subject_group]]
+            groups = [self.subject_group]
+        else:
+            # Handle the cases with 3 seqs (T2+STIR+MP2RAGE)
+            groups = self.subject_group.split('_')
+            mask_names = [self.masks_to_use[grp] for grp in groups]
+            thresholds = [self.thresh_to_use[grp] for grp in groups]
 
-                rf_subset = self.preds_df[(self.preds_df[f'seq'] == seq) & (self.preds_df['threshold'] == thresh)]
+        def blank_prob_with_cc(cc_path) -> Tuple[sitk.Image, np.ndarray, np.ndarray]:
+            """ Create a blank connected component image with the same shape as the original CC image. """
+            cc_im = load_reorient(cc_path, orientation='LAS')
+            cc_arr = sitk_to_numpy(cc_im)
+            probs_arr = np.zeros_like(cc_arr, dtype=np.float32)
+            return cc_im, cc_arr, probs_arr
 
-                cc_path = self.cc_dir / f'thr-{thresh}' / seqs[seq]
-                if not cc_path.exists():
-                    print(f'No connected components for {seq} with threshold {thresh}. Skipping.')
-                    continue
+        # Create blank arrays to store the outputs (we need this as we may have to combine outputs for two sequences)
+        cc_im, _, probs_arr_final = blank_prob_with_cc(self.cc_dir / f'thr-{thresholds[0]}' / mask_names[0])
+        cc_arr_final = np.zeros_like(probs_arr_final, dtype=np.int32)
 
-                # Load the existing connected components for this sequence and binarisation threshold
-                cc_im = load_reorient(cc_path, orientation='LAS')
-                cc_arr = sitk_to_numpy(cc_im)
-                probs_arr = np.zeros_like(cc_arr, dtype=np.float32)
+        for mask_fname, thresh, grp in zip(mask_names, thresholds, groups):
+            # Determine the mask type (T2, mean, MP2RAGE, STIR, PSIR) from the filename 'preds_mean_cc', 'T2_pred_cc', etc.
+            mask_types = [seqname for seqname in ['T2', 'mean', 'MP2RAGE', 'STIR', 'PSIR'] if seqname in mask_fname]
+            if len(mask_types) != 1:
+                raise ValueError(f'Expected exactly one sequence type in mask_fname: {mask_fname}. Found: {mask_types}')
+            mask_type = mask_types[0]
+            rf_subset = self.preds_df[(self.preds_df[f'seq'] == mask_type) & (self.preds_df['threshold'] == thresh)]
+            if rf_subset.empty:
+                msg = f'No prediction rows for {mask_type} with threshold {thresh}. Will save blank image.'
+                warn(msg)
 
-                if rf_subset.empty:
-                    msg = f'No prediction rows for {seq} with threshold {thresh}. Will save blank image.'
-                    warn(msg)
+            # Load the existing connected components for this sequence and binarisation threshold
+            cc_path = self.cc_dir / f'thr-{thresh}' / mask_fname
+            _, cc_arr, probs_arr = blank_prob_with_cc(cc_path)
 
-                self.process_and_save_simple(rf_subset, cc_arr, probs_arr, self.out_dir, cc_im, cc_path, min_prob)
+            if len(groups) > 1:
+                fov_arr = self.get_fov_ims(grp)
+                fov_arr = fov_arr > 0
+                # Keep CCs entirely within MP2RAGE FOV, and those with >50% within FOV. Remove the rest.
+                cc_ids, cc_cnts = np.unique(cc_arr, return_counts=True)
+                if len(cc_ids) > 1:
+                    def process_partial_ccs(cc_arr, cc_ids, cc_cnts):
+                        """ Process the connected components to remove those that are partially outside the FOV. """
+                        for cc_id, cc_cnt in zip(cc_ids[1:], cc_cnts[1:]):
+                            new_cnt = (cc_arr == cc_id).sum()
+                            # If the remaining part of the CC is less than 50%, then remove it entirely
+                            if new_cnt < 0.5 * cc_cnt:
+                                cc_arr[cc_arr == cc_id] = 0
+                        return cc_arr
+
+                    if grp == 'MP2RAGE':
+                        cc_arr = cc_arr * fov_arr
+                        cc_arr = process_partial_ccs(cc_arr, cc_ids, cc_cnts)
+                    elif grp == 'STIR' and 'MP2RAGE' in self.subject_group:
+                        # Keep STIR CCs that are entirely outside MP2RAGE FOV, and those with >50% outside MP2RAGE FOV.
+                        cc_arr = cc_arr * ~fov_arr
+                        cc_arr = process_partial_ccs(cc_arr, cc_ids, cc_cnts)
+
+            cc_arr, probs_arr = self.process_cc_probs_simple(rf_subset, cc_arr, probs_arr, min_prob)
+
+            cc_arr_final = np.where(cc_arr > 0, cc_arr, cc_arr_final)  # Combine the connected components
+            probs_arr_final = np.where(probs_arr > 0, probs_arr, probs_arr_final)  # Combine the probabilities
+
+        # Re-process CCs because we may have combined multiple sequences (with different CC IDs)
+        cc_arr_final, probs_arr_final = self.reprocess_ccs(cc_arr_final, probs_arr_final)
+
+        # Save the new connected components and probabilities
+        self.save_outputs(cc_arr_final, probs_arr_final, cc_im, self.out_dir)
+
 
     def adapt_full_single_case(self, seqs: Dict[str, str], thresholds: List[float], min_prob: float = 0.15):
         """ Adapt the connected components for a single case.
@@ -587,7 +678,8 @@ class Predaptor:
     def adapt_hybrid_single_case(self, seqs: Dict[str, str], thresholds: List[float], min_prob: float = 0.15):
         raise NotImplementedError
 
-    def run_adaptation(self, adapt_type: str, seqs: Dict[str, str], thresholds: List[float], min_prob: float = 0.0):
+    def run_adaptation(self, adapt_type: str, seqs: Optional[Dict[str, str]] = None,
+                       thresholds: Optional[List[float]] = None, min_prob: float = 0.0):
         """ Run the adaptation for all cases/subjects.
         Args:
             adapt_type (str): The type of adaptation to run. Either 'simple' or 'full'.
@@ -609,7 +701,7 @@ class Predaptor:
             raise ValueError('adapt_type must be either "simple" or "full".')
 
         if adapt_type == 'simple':
-            self.adapt_simple_single_case(seqs, thresholds, min_prob)
+            self.adapt_simple_single_case(min_prob)
         elif adapt_type == 'full':
             self.adapt_full_single_case(seqs, thresholds, min_prob)
         elif adapt_type == 'hybrid':
@@ -618,22 +710,21 @@ class Predaptor:
 
 class Predaptor3D(Predaptor):
     def __init__(self, cc_dir: Path, out_dir: Path, anat_dir: Path, preds_df_path: Optional[Path] = None,
-                 preds_df: Optional[pd.DataFrame] = None, id_cols: List[str] = None):
+                 preds_df: Optional[pd.DataFrame] = None, id_cols: List[str] = None,
+                 masks_to_use: Optional[Dict] = None, thresh_to_use: Optional[Dict] = None
+                 ):
         id_cols = id_cols if id_cols is not None else ['case_id', 'cc_id', 'threshold']
-        super().__init__(cc_dir, out_dir, anat_dir, preds_df_path=preds_df_path, preds_df=preds_df, id_cols=id_cols)
+        super().__init__(cc_dir, out_dir, anat_dir, preds_df_path=preds_df_path, preds_df=preds_df, id_cols=id_cols,
+                         masks_to_use=masks_to_use, thresh_to_use=thresh_to_use)
         self.process_slicewise = False
 
-    def process_and_save_simple(self, preds_rows: pd.DataFrame, cc_arr: np.ndarray, probs_arr: np.ndarray,
-                                out_dir: Path, cc_im: Optional[sitk.Image] = None,
-                                cc_path: Optional[Path] = None, min_prob: Optional[float] = None):
+    def process_cc_probs_simple(self, preds_rows: pd.DataFrame, cc_arr: np.ndarray, probs_arr: np.ndarray,
+                                min_prob: Optional[float] = None):
         """ Assign probabilities and process connected component shapes for a single case if necessary.
         Args:
             preds_rows (pd.DataFrame): The rows from the preds_df for this case.
             cc_arr (np.ndarray): The 3D array of connected components.
             probs_arr (np.ndarray): The probabilities for each CC (or all zeros to be filled) (same shape as cc_arr)
-            out_dir (Path): The output directory to save the adapted connected components and probabilities.
-            cc_im (sitk.Image): None here, because the cc_path is used to copy the original CC image to the new dir.
-            cc_path (Path): The path to the connected components for this case.
             min_prob (float): None. Not used for 3D adaptation.
         Returns:
             None
@@ -644,13 +735,7 @@ class Predaptor3D(Predaptor):
             # Set the probability for this slice
             probs_arr[cc_arr == cc_id] = y_prob
 
-        # Re-orient cc_im to gt orientation
-        cc_im = sitk.DICOMOrient(cc_im, self.target_orientation)
-        sitk.WriteImage(cc_im, out_dir / 'prediction_map.nii.gz')
-
-        # Extract the probability for each connected component
-        probs_df = self.get_probs_from_ccs(cc_arr, probs_arr)
-        probs_df.to_csv(out_dir / 'prediction_proba.csv', index=False)
+        return cc_arr, probs_arr
 
     @staticmethod
     def get_lesions_to_keep(overlapping_lesions_dict: Dict) -> Dict:
@@ -744,19 +829,14 @@ def main(args):
         cc_dir=data_dir / 'ccs',
         out_dir=out_dir,
         anat_dir=args.anat_dir,
-        preds_df=preds
+        preds_df=preds,
+        masks_to_use={'MP2RAGE': 'preds_mean_cc.nii.gz',
+                      'STIR': 'T2_pred_sc-masked_cc.nii.gz',
+                      'PSIR': 'T2_pred_sc-masked_cc.nii.gz'},
+        thresh_to_use={'MP2RAGE': 0.0001, 'STIR': 0.00001, 'PSIR': 10**-6},
     )
-    # TODO: use specific thresholds and masks per group
-    #   -> Subset	Mask	Threshold
-    #       STIR	T2	0.00001
-    #       PSIR	T2	10^-6
-    #       MP2RAGE	mean	0.0001
 
-    predadapt3D.run_adaptation(adapt_type='simple',
-                               seqs={'T2': 'T2_pred_sc-masked_cc.nii.gz',
-                                     'mean': 'preds_mean_cc.nii.gz'},
-                               thresholds=[0.00001],  # TODO
-                               min_prob=0.0)
+    predadapt3D.run_adaptation(adapt_type='simple', min_prob=0.0)
 
 
 if __name__ == '__main__':
