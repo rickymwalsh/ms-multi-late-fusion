@@ -4,9 +4,9 @@
     "author": "Ricky Walsh",
     "tool-version": "v1.0",
     "schema-version": "0.5",
-    "command-line": "home=$(pwd); unzip [INPUT_ARCHIVE] -d /app/inference/input ; cd /app/inference; mkdir -p OUTDIR; bash run_inference.sh input/* OUTDIR; rm -rf OUTDIR/tmp && tar -cvzf ${home}/[OUTPUT_FILE] OUTDIR",
+    "command-line": "home=$(pwd); unzip [INPUT_ARCHIVE] -d input_data; mkdir input; mv input_data/ input/; mkdir OUTDIR; cd /app/inference; bash run_inference.sh ${home}/input/* ${home}/OUTDIR; sed -i '1s/label/id/' ${home}/OUTDIR/prediction_proba.csv; rm -rf ${home}/OUTDIR/tmp && tar -cvzf ${home}/[OUTPUT_FILE] ${home}/OUTDIR",
     "container-image": {
-        "image": "rickymwalsh/late-fusion-empenn:v1.0",
+        "image": "rickymwalsh/late-fusion-empenn:v1.1",
         "index": "docker://",
         "type": "docker",
         "container-opts": [
