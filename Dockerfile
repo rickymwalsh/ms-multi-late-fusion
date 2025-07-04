@@ -8,14 +8,14 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends curl bzip2 libglib2.0-0 gcc && \
     rm -rf /var/lib/apt/lists/*
 
-## Create app directory
-#RUN mkdir /app
-## Copy program files into the container
-#COPY ./inference /app/inference
-#COPY ./requirements.txt /app/requirements.txt
+# Create app directory
+RUN mkdir /app
+# Copy program files into the container
+COPY ./inference /app/inference
+COPY ./requirements.txt /app/requirements.txt
 
-# Copy the files from the GitHub repository
-RUN git clone https://github.com/rickymwalsh/ms-multi-late-fusion.git app
+## Copy the files from the GitHub repository
+#RUN git clone https://github.com/rickymwalsh/ms-multi-late-fusion.git app
 
 RUN cd /app && git clone -b rw/tta_pmaps https://github.com/rickymwalsh/spinalcordtoolbox.git sct
 RUN cd /app/sct && ./install_sct -iygc
