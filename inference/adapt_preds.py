@@ -237,7 +237,8 @@ class Predaptor:
         fov_path = self.out_dir / 'tmp' / f'{seq}_FOV_resampled.nii.gz'
         if not fov_path.exists():
             raise FileNotFoundError(f'FOV image for {seq} not found at {fov_path}.')
-        fov_im = sitk_to_numpy(sitk.ReadImage(str(fov_path)))
+        fov_im = load_reorient(fov_path, orientation='LAS')  # To be consistent with the loaded CC arr
+        fov_im = sitk_to_numpy(fov_im)
         return fov_im
 
     @staticmethod
@@ -602,7 +603,7 @@ class Predaptor:
 
         def blank_prob_with_cc(cc_path) -> Tuple[sitk.Image, np.ndarray, np.ndarray]:
             """ Create a blank connected component image with the same shape as the original CC image. """
-            cc_im = load_reorient(cc_path, orientation='LAS')
+            cc_im = load_reorient(cc_path, orientation='LAS')  # Consistent orientation (some processing uses slices)
             cc_arr = sitk_to_numpy(cc_im)
             probs_arr = np.zeros_like(cc_arr, dtype=np.float32)
             return cc_im, cc_arr, probs_arr
@@ -627,7 +628,7 @@ class Predaptor:
             _, cc_arr, probs_arr = blank_prob_with_cc(cc_path)
 
             if len(groups) > 1:
-                fov_arr = self.get_fov_ims(grp)
+                fov_arr = self.get_fov_ims('MP2RAGE')
                 fov_arr = fov_arr > 0
                 # Keep CCs entirely within MP2RAGE FOV, and those with >50% within FOV. Remove the rest.
                 cc_ids, cc_cnts = np.unique(cc_arr, return_counts=True)
@@ -648,6 +649,8 @@ class Predaptor:
                         # Keep STIR CCs that are entirely outside MP2RAGE FOV, and those with >50% outside MP2RAGE FOV.
                         cc_arr = cc_arr * ~fov_arr
                         cc_arr = process_partial_ccs(cc_arr, cc_ids, cc_cnts)
+                        # TODO: for CCs partially in MP2RAGE, the above will still remove the part in MP2RAGE, even
+                        #     if we wanted to keep the whole thing...
 
             cc_arr, probs_arr = self.process_cc_probs_simple(rf_subset, cc_arr, probs_arr, min_prob)
 
